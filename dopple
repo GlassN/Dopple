@@ -1,0 +1,177 @@
+#!/usr/bin/env python3
+import subprocess #allows python to run terminal commands
+import optparse #allows arguments to be passed to program
+import re #regular expression search
+import os #used for writing and reading from file
+import socket #used to check incoming packet headers for their source MAC address
+import signal #allow a simple closing routing for the program
+fileDir = os.path.dirname(__file__) #gets directory that his file is in
+
+def getargs(): #gets the arguments for the program, checking for errors
+    usage_text = """
+    This program is used to scan/spoof MAC addresses
+    \n\t[Interface options]
+    \t(The last used interface will be used if none are given)
+    \t--interface [Interface] is used to specify what interface the program uses
+    \t--list is used to select from a list the device's network interfaces
+    \n\t[Program options]
+    \t--mac [MAC] sets an interface with a specified MAC address
+    \t--duplicate sets an interface with the MAC address of a connected machine
+    \t--scan is used to view the mac address of a connected machine\n
+    Usage example: sudo dopple -i enp3s0 -d\n
+    For more help, please use --help.
+    """
+    parser = optparse.OptionParser(usage=usage_text, version="%prog 1.0 beta")
+    parser.add_option("-i", "--interface", dest="interface", help="interface to be changed")
+    parser.add_option("-l", "--list", action="store_true", dest="list", help="list interfaces and allow user selection")
+    parser.add_option("-m", "--mac", dest="mac", help="set interface to a specified mac address")
+    parser.add_option("-s", "--scan", action="store_true", dest="scan", help="shows the MAC address of the device connected to the interface")
+    parser.add_option("-d", "--duplicate", action="store_true", dest="dup", help="sets the interface to the MAC address of the connected device")
+    (options, arguments) = parser.parse_args()
+    checkRoot()
+    checkMacFile()
+ 
+    #Need a list of device interfaces for some functions and error checking
+    #The below command returns a 2d array, the only way to extract a clean list is with a loop
+    rawinterfaces = socket.if_nameindex()
+    interfacelist = [""] * len(rawinterfaces)
+    for i in range (len(rawinterfaces)):
+        interfacelist[i] = rawinterfaces[i][1]
+ 
+    if not options.mac and not options.dup and not options.scan:
+        parser.error("Missing required parameters")
+ 
+    if (options.mac and options.dup) or (options.mac and options.scan) or (options.scan and options.dup):
+        parser.error("Too many instructions, only use one of the following: --mac, --scan, or --duplicate")
+ 
+    if options.interface and options.list:
+        parser.error("Too many instructions, only use either --interface or --list")
+ 
+    #If no interface is given, the program will check the stored file for the last used interface
+    if not options.interface and not options.list:
+        if os.path.exists(os.path.join(fileDir, 'bin', 'interface')):
+            intfile = open(os.path.join(fileDir, 'bin', 'interface'))
+            options.interface = intfile.read()
+            intfile.close()
+        else:
+            parser.error("Interface hasn't been set")
+ 
+    if options.list:
+        print("Input the number corresponding to chosen interface")
+        #lists the interfaces
+        for i in range(len(interfacelist)):
+            print(str(i+1)+". "+interfacelist[i])
+        try:
+            sel = int(input("Interface: "))
+        except ValueError:
+            parser.error("Invalid selection, input must be an integer")
+        if sel not in range(1, len(interfacelist)+1):
+            parser.error("Invalid interface selection")
+        options.interface = interfacelist[sel-1]
+        print("")
+ 
+    #If an interface is specified, then it will also save the interface to a file
+    if options.interface:
+        if options.interface not in interfacelist:
+            parser.error("Interface not found")
+        else:
+            #Saves the interface to a file for future use
+            if not os.path.isdir(os.path.join(fileDir, 'bin')):
+                os.mkdir(os.path.join(fileDir, 'bin'))
+            intfile = open(os.path.join(fileDir, 'bin', 'interface'), "w")
+            intfile.seek(0)
+            intfile.write(options.interface)
+            intfile.truncate()
+            intfile.close()
+ 
+    #mac error control using regular expressions
+    if options.mac:
+        if not re.search(r"^[a-fA-F0-9]{2}(:[a-fA-F0-9]{2}){5}$", options.mac):
+            parser.error("Invalid MAC address")
+ 
+    return options #return values for interface and mac address
+
+def changeMac(interface, mac): #Routine used to set MAC address
+    subprocess.call(["sudo", "ip", "link", "set", "dev", interface, "down"])
+    subprocess.call(["sudo", "ip", "link", "set", "dev", interface, "address", mac])
+    subprocess.call(["sudo", "ip", "link", "set", "dev", interface, "up"])
+
+def checkMacFile(): #ran on start up, resets if the mac file still exists
+    if os.path.exists(os.path.join(fileDir, 'bin', 'mac')) and os.path.isdir('bin'):
+        print("MAC address wasn't reset last session, attempting restore")
+        intfile = open(os.path.join(fileDir, 'bin', 'interface'))
+        lastinterface = intfile.read()
+        intfile.close()
+        resetMac(lastinterface)
+
+def resetMac(interface):
+    mac = opensavedMac()
+    changeMac(interface, mac)
+    print("Returned MAC address back to: " + mac)
+    os.remove(os.path.join(fileDir, 'bin', 'mac'))
+
+
+def getCurrentMac(interface):
+    getMac = subprocess.check_output(["ip", "link", "show", interface])
+    #This next check was having issues with my previous regular expression
+    #Fortunately we are getting the mac address from a command, we dont need to be so strict
+    checkMac = re.search(r"\w\w(:\w\w){5}", str(getMac))
+    return checkMac.group(0)
+
+def saveMac(mac):
+    macfile = open(os.path.join(fileDir, 'bin', 'mac'), "w")
+    macfile.seek(0)
+    macfile.write(mac)
+    macfile.truncate()
+    macfile.close()
+
+def opensavedMac():
+    macfile = open(os.path.join(fileDir, 'bin', 'mac'))
+    a = macfile.read()
+    macfile.close()
+    return a
+
+def signal_handler(sig, frame):
+    print("\n")
+    if os.path.exists(os.path.join(fileDir, 'bin', 'mac')) and os.path.isdir('bin'):
+        intfile = open(os.path.join(fileDir, 'bin', 'interface'))
+        lastinterface = intfile.read()
+        intfile.close()
+        print("Returning address back to normal...")
+        resetMac(lastinterface)
+    exit()
+signal.signal(signal.SIGINT, signal_handler)
+
+def getConnectedMac(interface):
+    subprocess.call(["sudo", "ip", "link", "set", "dev", interface, "down"])
+    subprocess.call(["sudo", "ip", "link", "set", "dev", interface, "up"])
+    currentMac = getCurrentMac(interface)
+    print("Searching for connected device MAC address...")
+    conn = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(3))
+    while True:
+        data, inc = conn.recvfrom(12)
+        dest = str.lower(':'.join(map('{:02x}'.format, data[6:12])).upper())
+        if inc[0] == interface and dest != currentMac:
+            return(dest)
+
+def checkRoot(): #root access is needed for packet sniffing and setting MAC addresses
+    if os.geteuid()!=0:
+        exit("You need root privileges to run this program, try using 'sudo'")
+
+def main():
+    options = getargs()
+    print("Using interface: " + options.interface)
+    saveMac(getCurrentMac(options.interface))
+    print("Saved current MAC address: " + getCurrentMac(options.interface))
+    if options.dup or options.scan:
+        options.mac = getConnectedMac(options.interface)
+        if options.scan:
+            os.remove(os.path.join(fileDir, 'bin', 'mac'))
+            exit("Mac address of connected device: " + options.mac)
+    changeMac(options.interface, options.mac)
+    print("Device MAC address has been set to: " + options.mac)
+    print("Press ^C (CTRL+C) to return MAC address and exit")
+    signal.pause()
+
+if __name__ == '__main__':
+    main()
